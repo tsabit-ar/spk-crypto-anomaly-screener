@@ -7,10 +7,11 @@ Executes the full end-to-end screening workflow:
 4. Evaluates and ranks candidates using TOPSIS Multi-Criteria Decision Engine.
 5. Filters candidates meeting the anomaly threshold (Ci >= 0.65).
 6. Applies SQLite state cooldown logic and dispatches Telegram alerts.
+7. Supports single-run execution and continuous daemon/scheduler loop mode.
 """
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 import sys
 import time
@@ -151,6 +152,64 @@ def run_pipeline(
     return ranked_df
 
 
+def start_scheduler(
+    interval_seconds: int = 900,
+    scan_limit: int = 25,
+    min_ci_threshold: float = 0.65,
+    cooldown_hours: float = 4.0,
+    delta_bypass: float = 0.15,
+    db_path: str = DEFAULT_DB_PATH,
+    dry_run: bool = False,
+) -> None:
+    """Run continuous anomaly screener loop at fixed intervals.
+
+    Args:
+        interval_seconds: Delay between scans in seconds (default: 900 / 15 mins).
+        scan_limit: Number of universe candidates to pre-filter (default: 25).
+        min_ci_threshold: Minimum TOPSIS Ci score to trigger anomaly alert (default: 0.65).
+        cooldown_hours: Minimum hours between repeat alerts for same coin (default: 4.0).
+        delta_bypass: Score jump required to bypass cooldown (default: 0.15).
+        db_path: SQLite database file path.
+        dry_run: If True, do not send live Telegram alerts.
+    """
+    interval_mins = interval_seconds / 60.0
+    print("\n" + SEPARATOR)
+    print(f" 🔄 STARTING DAEMON SCREENER SCHEDULER (Interval: {interval_seconds}s / {interval_mins:.1f} mins)")
+    print(" Press Ctrl+C to stop the scheduler.")
+    print(SEPARATOR + "\n")
+
+    iteration = 1
+    try:
+        while True:
+            cycle_start = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            print(f"\n>>> [Scan Cycle #{iteration}] Started at {cycle_start}")
+            try:
+                run_pipeline(
+                    scan_limit=scan_limit,
+                    min_ci_threshold=min_ci_threshold,
+                    cooldown_hours=cooldown_hours,
+                    delta_bypass=delta_bypass,
+                    db_path=db_path,
+                    dry_run=dry_run,
+                )
+            except Exception as e:
+                print(f"\n[!] Error during pipeline cycle #{iteration}: {e}")
+                print("    Recovering automatically for next scheduled cycle...")
+
+            next_run_dt = datetime.now(timezone.utc) + timedelta(seconds=interval_seconds)
+            next_run_str = next_run_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            print(f"⏳ Next scan in {interval_mins:.1f} minutes ({next_run_str}). Sleeping...\n")
+
+            time.sleep(interval_seconds)
+            iteration += 1
+
+    except KeyboardInterrupt:
+        print("\n" + SEPARATOR)
+        print(" 🛑 Scheduler stopped by user (Ctrl+C). Exiting gracefully.")
+        print(SEPARATOR + "\n")
+        sys.exit(0)
+
+
 def main():
     """CLI Entrypoint for orchestrator."""
     parser = argparse.ArgumentParser(description="SPK Crypto Anomaly Screener Orchestrator")
@@ -160,17 +219,30 @@ def main():
     parser.add_argument("--bypass", type=float, default=float(os.getenv("DELTA_BYPASS", "0.15")), help="Ci jump to bypass cooldown (default: 0.15)")
     parser.add_argument("--db", type=str, default=os.getenv("DB_PATH", DEFAULT_DB_PATH), help="SQLite database path")
     parser.add_argument("--dry-run", action="store_true", help="Run without sending real Telegram alerts")
+    parser.add_argument("--loop", action="store_true", help="Run in continuous daemon loop mode")
+    parser.add_argument("--interval", type=int, default=int(os.getenv("SCAN_INTERVAL_SECONDS", "900")), help="Loop interval in seconds (default: 900 / 15 mins)")
 
     args = parser.parse_args()
 
-    run_pipeline(
-        scan_limit=args.limit,
-        min_ci_threshold=args.threshold,
-        cooldown_hours=args.cooldown,
-        delta_bypass=args.bypass,
-        db_path=args.db,
-        dry_run=args.dry_run,
-    )
+    if args.loop:
+        start_scheduler(
+            interval_seconds=args.interval,
+            scan_limit=args.limit,
+            min_ci_threshold=args.threshold,
+            cooldown_hours=args.cooldown,
+            delta_bypass=args.bypass,
+            db_path=args.db,
+            dry_run=args.dry_run,
+        )
+    else:
+        run_pipeline(
+            scan_limit=args.limit,
+            min_ci_threshold=args.threshold,
+            cooldown_hours=args.cooldown,
+            delta_bypass=args.bypass,
+            db_path=args.db,
+            dry_run=args.dry_run,
+        )
 
 
 if __name__ == "__main__":

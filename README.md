@@ -82,12 +82,18 @@ python test_phase3.py
 ## ⚡ Menjalankan Pipeline Orchestrator
 
 ```powershell
-# 1. Menjalankan Pemindaian Live (Otomatis mengirim alert Telegram jika ada anomali)
+# 1. Menjalankan Pemindaian Tunggal (Single Run)
 python main.py
 
-# 2. Menjalankan dalam Mode Simulasi (Dry Run tanpa mengirim notifikasi Telegram)
+# 2. Menjalankan Mode Daemon/Loop Otomatis (Setiap 15 Menit / 900 Detik)
+python main.py --loop
+
+# 3. Mode Daemon dengan Kustomisasi Interval (Misal: Tiap 10 Menit = 600 Detik)
+python main.py --loop --interval 600
+
+# 4. Menjalankan dalam Mode Simulasi (Dry Run tanpa mengirim notifikasi Telegram)
 python main.py --dry-run
 
-# 3. Kustomisasi Parameter Eksekusi via CLI
+# 5. Kustomisasi Parameter Eksekusi via CLI
 python main.py --limit 30 --threshold 0.70 --cooldown 6.0 --bypass 0.20
 ```

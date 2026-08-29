@@ -26,8 +26,12 @@ class TelegramDispatcher:
             bot_token: Telegram bot token (falls back to TELEGRAM_BOT_TOKEN env var).
             chat_id: Target chat or channel ID (falls back to TELEGRAM_CHAT_ID env var).
         """
-        self.bot_token = (bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")).strip()
-        self.chat_id = (chat_id or os.getenv("TELEGRAM_CHAT_ID", "")).strip()
+        if bot_token is None:
+            bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if chat_id is None:
+            chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+        self.bot_token = bot_token.strip()
+        self.chat_id = chat_id.strip()
 
     @property
     def is_configured(self) -> bool:
