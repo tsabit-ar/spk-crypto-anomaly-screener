@@ -1,0 +1,52 @@
+name: 15-Minute Crypto Anomaly Screener
+
+on:
+  schedule:
+    # Berjalan setiap 15 menit UTC
+    - cron: '*/15 * * * *'
+  workflow_dispatch: # Memungkinkan tombol 'Run workflow' manual di UI GitHub
+
+jobs:
+  screen_market:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore SQLite State Database Cache
+        uses: actions/cache@v4
+        with:
+          path: topsis_screener.db
+          key: topsis-db-${{ github.run_id }}
+          restore-keys: |
+            topsis-db-
+
+      - name: Execute Anomaly Screener Pipeline
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MIN_CI_ALERT_THRESHOLD: 0.65
+          COOLDOWN_HOURS: 4
+          DELTA_BYPASS: 0.15
+          SCAN_LIMIT: 25
+        run: |
+          python main.py
+
+      - name: Save Updated SQLite State Cache
+        uses: actions/cache@v4
+        if: always()
+        with:
+          path: topsis_screener.db
+          key: topsis-db-${{ github.run_id }}
