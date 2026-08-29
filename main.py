@@ -155,7 +155,7 @@ def main():
     """CLI Entrypoint for orchestrator."""
     parser = argparse.ArgumentParser(description="SPK Crypto Anomaly Screener Orchestrator")
     parser.add_argument("--limit", type=int, default=int(os.getenv("SCAN_LIMIT", "25")), help="Universe scan limit (default: 25)")
-    parser.add_argument("--threshold", type=float, default=float(os.getenv("MIN_CI_THRESHOLD", "0.65")), help="Minimum Ci anomaly threshold (default: 0.65)")
+    parser.add_argument("--threshold", type=float, default=float(os.getenv("MIN_CI_ALERT_THRESHOLD", os.getenv("MIN_CI_THRESHOLD", "0.65"))), help="Minimum Ci anomaly threshold (default: 0.65)")
     parser.add_argument("--cooldown", type=float, default=float(os.getenv("COOLDOWN_HOURS", "4.0")), help="Alert cooldown in hours (default: 4.0)")
     parser.add_argument("--bypass", type=float, default=float(os.getenv("DELTA_BYPASS", "0.15")), help="Ci jump to bypass cooldown (default: 0.15)")
     parser.add_argument("--db", type=str, default=os.getenv("DB_PATH", DEFAULT_DB_PATH), help="SQLite database path")
