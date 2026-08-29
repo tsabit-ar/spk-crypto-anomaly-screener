@@ -35,6 +35,7 @@ jobs:
 
       - name: Execute Anomaly Screener Pipeline
         env:
+          BINANCE_BASE_URL: https://binance-fapi-proxy.tsabitarrosyid.workers.dev
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MIN_CI_ALERT_THRESHOLD: 0.65

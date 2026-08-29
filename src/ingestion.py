@@ -6,13 +6,18 @@ Includes built-in resilient DNS-over-HTTPS (DoH) resolution to bypass ISP-level
 DNS poisoning/blocks seamlessly.
 """
 
+import os
 from typing import Any, Dict, List, Optional
 import socket
 import requests
 from urllib3.util import connection
 
-BINANCE_FAPI_BASE_URL = "https://fapi.binance.com"
+BINANCE_DEFAULT_BASE_URL = "https://fapi.binance.com"
 DEFAULT_TIMEOUT = 10  # seconds
+
+def get_base_url() -> str:
+    """Get the Binance Futures Base URL (supports custom proxy via BINANCE_BASE_URL env var)."""
+    return os.getenv("BINANCE_BASE_URL", BINANCE_DEFAULT_BASE_URL).rstrip("/")
 
 # In-memory DNS cache for resolved hostnames
 _dns_cache: Dict[str, str] = {}
@@ -111,7 +116,9 @@ def _get(endpoint: str, params: Optional[Dict[str, Any]] = None) -> Any:
         requests.HTTPError: If the HTTP request returned an unsuccessful status code.
         requests.RequestException: If network or connection errors occur.
     """
-    url = f"{BINANCE_FAPI_BASE_URL}{endpoint}"
+    base_url = get_base_url()
+    path = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+    url = f"{base_url}{path}"
     response = _session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
     return response.json()
