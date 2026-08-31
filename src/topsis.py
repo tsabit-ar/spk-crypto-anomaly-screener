@@ -1,11 +1,18 @@
 """TOPSIS (Technique for Order Preference by Similarity to Ideal Solution) Decision Engine.
 
 Ranks cryptocurrency anomaly candidates based on 5 multi-criteria attributes:
-- C1: Funding Rate (%) [Cost, weight=0.25]
-- C2: Delta OI 4H (%) [Benefit, weight=0.25]
-- C3: Bollinger Band Width 1H (%) [Cost, weight=0.20]
-- C4: Depth Imbalance Ratio [Benefit, weight=0.15]
-- C5: Volume / OI Velocity [Benefit, weight=0.15]
+- Long Strategy:
+  - C1: Funding Rate (%) [Cost, weight=0.25]
+  - C2: Delta OI 4H (%) [Benefit, weight=0.25]
+  - C3: Bollinger Band Width 1H (%) [Cost, weight=0.20]
+  - C4: Depth Imbalance Ratio (Bid / Ask) [Benefit, weight=0.15]
+  - C5: Volume / OI Velocity [Benefit, weight=0.15]
+- Short Strategy:
+  - C1: Funding Rate (%) [Benefit, weight=0.25] (Filtered: C1 >= 0)
+  - C2: Delta OI 4H (%) [Benefit, weight=0.25]
+  - C3: Bollinger Band Width 1H (%) [Benefit, weight=0.20]
+  - C4: Depth Imbalance Ratio (Ask / Bid) [Benefit, weight=0.15]
+  - C5: Volume / OI Velocity [Benefit, weight=0.15]
 """
 
 from typing import Dict, List, Optional
@@ -13,17 +20,25 @@ import numpy as np
 import pandas as pd
 
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    "C1": 0.25,  # Funding Rate (%) -> Cost
-    "C2": 0.25,  # Delta OI 4H (%) -> Benefit
-    "C3": 0.20,  # BBW 1H (%) -> Cost
-    "C4": 0.15,  # Depth Imbalance -> Benefit
-    "C5": 0.15,  # Volume/OI Velocity -> Benefit
+    "C1": 0.25,  # Funding Rate (%)
+    "C2": 0.25,  # Delta OI 4H (%)
+    "C3": 0.20,  # BBW 1H (%)
+    "C4": 0.15,  # Depth Imbalance
+    "C5": 0.15,  # Volume/OI Velocity
 }
 
-DEFAULT_CRITERIA_TYPES: Dict[str, str] = {
+LONG_CRITERIA_TYPES: Dict[str, str] = {
     "C1": "cost",
     "C2": "benefit",
     "C3": "cost",
+    "C4": "benefit",
+    "C5": "benefit",
+}
+
+SHORT_CRITERIA_TYPES: Dict[str, str] = {
+    "C1": "benefit",
+    "C2": "benefit",
+    "C3": "benefit",
     "C4": "benefit",
     "C5": "benefit",
 }
@@ -46,7 +61,7 @@ class TopsisEngine:
             criteria_types: Dictionary mapping criteria to 'benefit' or 'cost'.
         """
         self.weights = weights or DEFAULT_WEIGHTS.copy()
-        self.criteria_types = criteria_types or DEFAULT_CRITERIA_TYPES.copy()
+        self.criteria_types = criteria_types or LONG_CRITERIA_TYPES.copy()
         self.criteria_keys = list(self.weights.keys())
 
         # Normalize weights to sum to 1.0
@@ -79,14 +94,12 @@ class TopsisEngine:
             return df
 
         # Step 1: Vector Normalization (Euclidean norm per column)
-        # r_ij = x_ij / sqrt(sum(x_kj^2))
         col_norms = np.sqrt(np.sum(matrix ** 2, axis=0))
         # Handle zero-norm edge case with epsilon
         col_norms = np.where(col_norms == 0, EPSILON, col_norms)
         norm_matrix = matrix / col_norms
 
         # Step 2: Weighted Normalized Decision Matrix
-        # v_ij = w_j * r_ij
         weight_vec = np.array([self.weights[k] for k in self.criteria_keys], dtype=np.float64)
         weighted_matrix = norm_matrix * weight_vec
 
@@ -105,13 +118,10 @@ class TopsisEngine:
                 ideal_neg[j] = np.max(col_values)
 
         # Step 4: Calculate Euclidean Distances (D+ and D-)
-        # D+_i = sqrt(sum((v_ij - A+_j)^2))
-        # D-_i = sqrt(sum((v_ij - A-_j)^2))
         d_pos = np.sqrt(np.sum((weighted_matrix - ideal_pos) ** 2, axis=1))
         d_neg = np.sqrt(np.sum((weighted_matrix - ideal_neg) ** 2, axis=1))
 
         # Step 5: Calculate Relative Closeness / Preference Score (Ci)
-        # Ci = D-_i / (D+_i + D-_i)
         denom = d_pos + d_neg
         denom = np.where(denom == 0, EPSILON, denom)
         ci_scores = d_neg / denom
@@ -126,3 +136,62 @@ class TopsisEngine:
         df_ranked["rank"] = df_ranked.index + 1
 
         return df_ranked
+
+
+def topsis_rank(df_candidates: pd.DataFrame) -> pd.DataFrame:
+    """Execute TOPSIS ranking for LONG strategy (Long Squeeze anomalies).
+
+    Criteria Matrix (Long):
+    - C1: Funding Rate (%) [Cost]
+    - C2: Delta OI 4H (%) [Benefit]
+    - C3: 1H BBW (%) [Cost]
+    - C4: Depth Imbalance Ratio (Bid / Ask) [Benefit]
+    - C5: Volume / OI Velocity [Benefit]
+
+    Args:
+        df_candidates: Snapshot DataFrame with C1..C5 columns.
+
+    Returns:
+        pd.DataFrame: Ranked Long candidate DataFrame.
+    """
+    if df_candidates.empty:
+        return df_candidates.copy()
+
+    df = df_candidates.copy().reset_index(drop=True)
+    engine = TopsisEngine(weights=DEFAULT_WEIGHTS, criteria_types=LONG_CRITERIA_TYPES)
+    return engine.rank_candidates(df)
+
+
+def topsis_short_rank(df_candidates: pd.DataFrame) -> pd.DataFrame:
+    """Execute TOPSIS ranking for SHORT strategy (Overburdened/Overheated anomalies).
+
+    Criteria Matrix (Short):
+    - Initial Filter: Discard coins with C1 < 0 (only positive funding rate C1 >= 0)
+    - C1: Funding Rate (%) [Benefit] (Overcrowded longs paying high fees)
+    - C2: Delta OI 4H (%) [Benefit] (Heavy position buildup)
+    - C3: 1H BBW (%) [Benefit] (Volatility expansion / overheated state)
+    - C4: Depth Imbalance Ratio (Ask / Bid) [Benefit] (Heavy sell wall resistance)
+    - C5: Volume / OI Velocity [Benefit] (High liquidity turnover)
+
+    Args:
+        df_candidates: Snapshot DataFrame with C1..C5 columns.
+
+    Returns:
+        pd.DataFrame: Ranked Short candidate DataFrame.
+    """
+    if df_candidates.empty:
+        return df_candidates.copy()
+
+    # Filter awal wajib membuang koin dengan nilai C1 di bawah 0 (hanya C1 >= 0)
+    df = df_candidates[df_candidates["C1"] >= 0].copy().reset_index(drop=True)
+    if df.empty:
+        return df
+
+    # Balikkan logika C4: Volume Ask / Volume Bid (Ask Liquidity / Bid Liquidity)
+    if "ask_liq_2pct" in df.columns and "bid_liq_2pct" in df.columns:
+        df["C4"] = (df["ask_liq_2pct"] + EPSILON) / (df["bid_liq_2pct"] + EPSILON)
+    else:
+        df["C4"] = 1.0 / (df["C4"] + EPSILON)
+
+    engine = TopsisEngine(weights=DEFAULT_WEIGHTS, criteria_types=SHORT_CRITERIA_TYPES)
+    return engine.rank_candidates(df)

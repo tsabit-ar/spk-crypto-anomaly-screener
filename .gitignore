@@ -17,10 +17,11 @@ venv.bak/
 .env.*
 !.env.example
 
-# Databases
+# Databases & Data
 *.db
 *.sqlite
 *.sqlite3
+*.csv
 
 # Distribution / packaging
 build/

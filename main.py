@@ -1,12 +1,14 @@
 """Main Pipeline Orchestrator for SPK Crypto Anomaly Screener.
 
-Executes the full end-to-end screening workflow:
-1. Ingests 24h bulk tickers from Binance Futures (Public API, $0 cost).
+Executes the full end-to-end dual screening workflow (Long & Short):
+1. Ingests 24h bulk tickers from Binance Futures (via Vercel proxy / public API, $0 cost).
 2. Pre-filters Top 25 dynamic & liquid universe candidates.
-3. Concurrently extracts 5 multi-criteria market features (C1 - C5).
-4. Evaluates and ranks candidates using TOPSIS Multi-Criteria Decision Engine.
-5. Filters candidates meeting the anomaly threshold (Ci >= 0.65).
-6. Applies SQLite state cooldown logic and dispatches Telegram alerts.
+3. Concurrently extracts multi-criteria market features (C1 - C5) into a unified snapshot.
+4. Concurrently computes Dual TOPSIS Rankings:
+   - Long Strategy (topsis_rank): Long Squeeze anomalies.
+   - Short Strategy (topsis_short_rank): Overburdened / Overheated anomalies.
+5. Evaluates and filters candidates meeting the anomaly threshold (Ci >= 0.65).
+6. Applies SQLite state cooldown logic per (symbol, signal_type) and dispatches Telegram alerts.
 7. Supports single-run execution and continuous daemon/scheduler loop mode.
 """
 
@@ -15,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 import os
 import sys
 import time
+from typing import Dict
 import pandas as pd
 
 # UTF-8 stdout encoding for Windows console compatibility
@@ -33,7 +36,7 @@ from src.features import extract_batch_metrics
 from src.ingestion import fetch_bulk_24h_tickers
 from src.prefilter import filter_top_universe
 from src.telegram_bot import TelegramDispatcher
-from src.topsis import TopsisEngine
+from src.topsis import topsis_rank, topsis_short_rank
 
 SEPARATOR = "=" * 80
 
@@ -45,25 +48,25 @@ def run_pipeline(
     delta_bypass: float = 0.15,
     db_path: str = DEFAULT_DB_PATH,
     dry_run: bool = False,
-) -> pd.DataFrame:
-    """Execute complete screener pipeline run.
+) -> Dict[str, pd.DataFrame]:
+    """Execute complete dual-direction screener pipeline run (Long & Short).
 
     Args:
         scan_limit: Number of universe candidates to pre-filter (default: 25).
         min_ci_threshold: Minimum TOPSIS Ci score to trigger anomaly alert (default: 0.65).
-        cooldown_hours: Minimum hours between repeat alerts for same coin (default: 4.0).
+        cooldown_hours: Minimum hours between repeat alerts for same coin and direction (default: 4.0).
         delta_bypass: Score jump required to bypass cooldown (default: 0.15).
         db_path: SQLite database file path.
         dry_run: If True, do not send live Telegram alerts.
 
     Returns:
-        pd.DataFrame: Ranked candidates DataFrame.
+        Dict[str, pd.DataFrame]: Dictionary containing 'long' and 'short' ranked DataFrames.
     """
     t_start = time.time()
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     print(SEPARATOR)
-    print(" 🚀 SPK CRYPTO ANOMALY SCREENER (BINANCE FUTURES USDT-M)")
+    print(" 🚀 SPK CRYPTO ANOMALY SCREENER (BINANCE FUTURES USDT-M) [DUAL LONG/SHORT]")
     print(f" ⏱️ Execution Time : {now_utc}")
     print(f" ⚙️ Config          : Limit={scan_limit} | Min Ci={min_ci_threshold:.2f} | Cooldown={cooldown_hours}h | Bypass=+{delta_bypass:.2f}")
     print(SEPARATOR)
@@ -82,34 +85,36 @@ def run_pipeline(
     candidates_df = filter_top_universe(bulk_data, limit=scan_limit)
     if candidates_df.empty:
         print("           [!] No candidates passed the pre-filter criteria.")
-        return pd.DataFrame()
+        return {"long": pd.DataFrame(), "short": pd.DataFrame()}
     print(f"           -> Selected {len(candidates_df)} liquid/active candidates.")
 
-    # 4. Extract Multi-Criteria Features
-    print("\n[Step 3/5] Concurrently extracting 5 anomaly criteria (C1 - C5)...")
+    # 4. Extract Multi-Criteria Features (Snapshot)
+    print("\n[Step 3/5] Concurrently extracting 5 anomaly criteria (C1 - C5) snapshot...")
     features_df = extract_batch_metrics(candidates_df, max_workers=6)
     if features_df.empty:
         print("           [!] Failed to extract features for candidates.")
-        return pd.DataFrame()
-    print(f"           -> Completed metric extraction for {len(features_df)} pairs.")
+        return {"long": pd.DataFrame(), "short": pd.DataFrame()}
+    print(f"           -> Completed metric snapshot extraction for {len(features_df)} pairs.")
 
-    # 5. TOPSIS Decision Engine Ranking
-    print("\n[Step 4/5] Computing TOPSIS multi-criteria preference scores (Ci)...")
-    engine = TopsisEngine()
-    ranked_df = engine.rank_candidates(features_df)
+    # 5. Dual TOPSIS Ranking (Long & Short)
+    print("\n[Step 4/5] Computing Dual TOPSIS Rankings (topsis_rank & topsis_short_rank)...")
+    long_ranked_df = topsis_rank(features_df)
+    short_ranked_df = topsis_short_rank(features_df)
+    print(f"           -> Long Ranked: {len(long_ranked_df)} pairs | Short Ranked: {len(short_ranked_df)} pairs.")
 
-    # 6. Anomaly Filtering & State Management
-    print(f"\n[Step 5/5] Evaluating anomaly candidates (Threshold: Ci >= {min_ci_threshold:.2f})...")
-    anomalies = ranked_df[ranked_df["topsis_score"] >= min_ci_threshold].copy()
+    # 6. Dual Anomaly Filtering & State Management
+    print(f"\n[Step 5/5] Evaluating Long & Short anomalies (Threshold: Ci >= {min_ci_threshold:.2f})...")
 
-    dispatched_count = 0
-    suppressed_count = 0
+    total_dispatched = 0
+    total_suppressed = 0
 
-    if anomalies.empty:
-        print("           -> No coins exceeded the anomaly threshold in this scan cycle.")
+    # --- Process LONG Anomalies ---
+    long_anomalies = long_ranked_df[long_ranked_df["topsis_score"] >= min_ci_threshold].copy() if not long_ranked_df.empty else pd.DataFrame()
+    print(f"\n  [🟢 LONG SQUEEZE SIGNALS] - Found {len(long_anomalies)} candidate(s):")
+    if long_anomalies.empty:
+        print("    -> No coins met the Long anomaly threshold in this scan cycle.")
     else:
-        print(f"           -> Found {len(anomalies)} candidate(s) meeting anomaly threshold:")
-        for _, row in anomalies.iterrows():
+        for _, row in long_anomalies.iterrows():
             sym = row["symbol"]
             ci = float(row["topsis_score"])
             price = float(row["last_price"])
@@ -120,36 +125,83 @@ def run_pipeline(
                 current_price=price,
                 cooldown_hours=cooldown_hours,
                 delta_bypass=delta_bypass,
+                signal_type="LONG",
                 db_path=db_path,
             )
 
             if should_alert:
                 if dispatcher.is_configured and not dry_run:
-                    sent = dispatcher.send_alert(row.to_dict())
+                    sent = dispatcher.send_alert(row.to_dict(), signal_type="LONG")
                     status_text = "DISPATCHED (Telegram Sent)" if sent else "FAILED (Telegram Error)"
                 else:
                     status_text = "DISPATCHED (Dry Run / No Token)"
-                dispatched_count += 1
+                total_dispatched += 1
             else:
                 status_text = "SUPPRESSED (Active Cooldown)"
-                suppressed_count += 1
+                total_suppressed += 1
 
-            print(f"              • {sym:<10} | Ci: {ci:.4f} | Rank: #{int(row['rank'])} -> {status_text}")
+            print(f"    • {sym:<10} | Ci: {ci:.4f} | Rank: #{int(row['rank'])} -> {status_text}")
 
-    # Summary Table Display
-    print("\n" + SEPARATOR)
-    print(" 📊 TOP 5 ANOMALY SCREENER LEADERBOARD")
-    print(SEPARATOR)
-    top5 = ranked_df.head(5)
+    # --- Process SHORT Anomalies ---
+    short_anomalies = short_ranked_df[short_ranked_df["topsis_score"] >= min_ci_threshold].copy() if not short_ranked_df.empty else pd.DataFrame()
+    print(f"\n  [🔴 SHORT WARNING SIGNALS] - Found {len(short_anomalies)} candidate(s):")
+    if short_anomalies.empty:
+        print("    -> No coins met the Short anomaly threshold in this scan cycle.")
+    else:
+        for _, row in short_anomalies.iterrows():
+            sym = row["symbol"]
+            ci = float(row["topsis_score"])
+            price = float(row["last_price"])
+
+            should_alert = should_send_alert(
+                symbol=sym,
+                current_ci=ci,
+                current_price=price,
+                cooldown_hours=cooldown_hours,
+                delta_bypass=delta_bypass,
+                signal_type="SHORT",
+                db_path=db_path,
+            )
+
+            if should_alert:
+                if dispatcher.is_configured and not dry_run:
+                    sent = dispatcher.send_alert(row.to_dict(), signal_type="SHORT")
+                    status_text = "DISPATCHED (Telegram Sent)" if sent else "FAILED (Telegram Error)"
+                else:
+                    status_text = "DISPATCHED (Dry Run / No Token)"
+                total_dispatched += 1
+            else:
+                status_text = "SUPPRESSED (Active Cooldown)"
+                total_suppressed += 1
+
+            print(f"    • {sym:<10} | Ci: {ci:.4f} | Rank: #{int(row['rank'])} -> {status_text}")
+
+    # Summary Tables Display
     summary_cols = ["rank", "symbol", "topsis_score", "last_price", "C1", "C2", "C3", "C4", "C5"]
-    print(top5[summary_cols].to_string(index=False))
+
+    print("\n" + SEPARATOR)
+    print(" 📊 TOP 5 LONG ANOMALIES [🟢 LONG SQUEEZE]")
+    print(SEPARATOR)
+    if not long_ranked_df.empty:
+        print(long_ranked_df.head(5)[summary_cols].to_string(index=False))
+    else:
+        print("No candidates available.")
+
+    print("\n" + SEPARATOR)
+    print(" 📊 TOP 5 SHORT ANOMALIES [🔴 SHORT WARNING]")
+    print(SEPARATOR)
+    if not short_ranked_df.empty:
+        print(short_ranked_df.head(5)[summary_cols].to_string(index=False))
+    else:
+        print("No candidates available (C1 >= 0 required).")
 
     elapsed = time.time() - t_start
-    print(SEPARATOR)
-    print(f" ✅ Pipeline Completed in {elapsed:.2f}s | Anomalies Detected: {len(anomalies)} | Dispatched: {dispatched_count} | Suppressed: {suppressed_count}")
+    total_anomalies = len(long_anomalies) + len(short_anomalies)
+    print("\n" + SEPARATOR)
+    print(f" ✅ Pipeline Completed in {elapsed:.2f}s | Anomalies: {total_anomalies} (Long: {len(long_anomalies)}, Short: {len(short_anomalies)}) | Dispatched: {total_dispatched} | Suppressed: {total_suppressed}")
     print(SEPARATOR + "\n")
 
-    return ranked_df
+    return {"long": long_ranked_df, "short": short_ranked_df}
 
 
 def start_scheduler(
@@ -161,20 +213,20 @@ def start_scheduler(
     db_path: str = DEFAULT_DB_PATH,
     dry_run: bool = False,
 ) -> None:
-    """Run continuous anomaly screener loop at fixed intervals.
+    """Run continuous dual-direction anomaly screener loop at fixed intervals.
 
     Args:
         interval_seconds: Delay between scans in seconds (default: 900 / 15 mins).
         scan_limit: Number of universe candidates to pre-filter (default: 25).
         min_ci_threshold: Minimum TOPSIS Ci score to trigger anomaly alert (default: 0.65).
-        cooldown_hours: Minimum hours between repeat alerts for same coin (default: 4.0).
+        cooldown_hours: Minimum hours between repeat alerts for same coin/direction (default: 4.0).
         delta_bypass: Score jump required to bypass cooldown (default: 0.15).
         db_path: SQLite database file path.
         dry_run: If True, do not send live Telegram alerts.
     """
     interval_mins = interval_seconds / 60.0
     print("\n" + SEPARATOR)
-    print(f" 🔄 STARTING DAEMON SCREENER SCHEDULER (Interval: {interval_seconds}s / {interval_mins:.1f} mins)")
+    print(f" 🔄 STARTING DUAL DAEMON SCREENER SCHEDULER (Interval: {interval_seconds}s / {interval_mins:.1f} mins)")
     print(" Press Ctrl+C to stop the scheduler.")
     print(SEPARATOR + "\n")
 
@@ -212,7 +264,7 @@ def start_scheduler(
 
 def main():
     """CLI Entrypoint for orchestrator."""
-    parser = argparse.ArgumentParser(description="SPK Crypto Anomaly Screener Orchestrator")
+    parser = argparse.ArgumentParser(description="SPK Crypto Anomaly Screener Orchestrator (Dual Long/Short)")
     parser.add_argument("--limit", type=int, default=int(os.getenv("SCAN_LIMIT", "25")), help="Universe scan limit (default: 25)")
     parser.add_argument("--threshold", type=float, default=float(os.getenv("MIN_CI_ALERT_THRESHOLD", os.getenv("MIN_CI_THRESHOLD", "0.65"))), help="Minimum Ci anomaly threshold (default: 0.65)")
     parser.add_argument("--cooldown", type=float, default=float(os.getenv("COOLDOWN_HOURS", "4.0")), help="Alert cooldown in hours (default: 4.0)")

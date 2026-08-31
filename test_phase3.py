@@ -149,7 +149,7 @@ def test_live_pipeline_orchestrator() -> bool:
     print("-" * 80)
 
     try:
-        ranked_df = run_pipeline(
+        results = run_pipeline(
             scan_limit=15,
             min_ci_threshold=0.50,
             cooldown_hours=4.0,
@@ -158,15 +158,18 @@ def test_live_pipeline_orchestrator() -> bool:
             dry_run=True,
         )
 
-        if ranked_df.empty:
-            print("     -> [FAIL] Orchestrator pipeline returned empty DataFrame.")
+        long_df = results.get("long", pd.DataFrame())
+        short_df = results.get("short", pd.DataFrame())
+
+        if long_df.empty:
+            print("     -> [FAIL] Orchestrator pipeline returned empty Long DataFrame.")
             return False
 
-        if "rank" not in ranked_df.columns or "topsis_score" not in ranked_df.columns:
+        if "rank" not in long_df.columns or "topsis_score" not in long_df.columns:
             print("     -> [FAIL] Output DataFrame missing 'rank' or 'topsis_score' columns.")
             return False
 
-        print(f"     -> [PASS] Live pipeline successfully processed and ranked {len(ranked_df)} pairs.")
+        print(f"     -> [PASS] Live pipeline successfully processed and ranked {len(long_df)} Long pairs and {len(short_df)} Short pairs.")
         return True
 
     except Exception as e:

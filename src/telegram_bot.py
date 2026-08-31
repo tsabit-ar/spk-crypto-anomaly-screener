@@ -1,6 +1,6 @@
 """Telegram Alert Dispatcher module for SPK Crypto Anomaly Screener.
 
-Formats and sends real-time anomaly alerts to Telegram channel/group via Telegram Bot API.
+Formats and sends real-time Long and Short anomaly alerts to Telegram channel/group via Telegram Bot API.
 """
 
 from datetime import datetime, timezone
@@ -13,7 +13,7 @@ REQUEST_TIMEOUT = 10  # seconds
 
 
 class TelegramDispatcher:
-    """Dispatches formatted cryptocurrency anomaly alerts to Telegram."""
+    """Dispatches formatted cryptocurrency anomaly alerts (Long / Short) to Telegram."""
 
     def __init__(
         self,
@@ -38,15 +38,24 @@ class TelegramDispatcher:
         """Check if both Bot Token and Chat ID are properly configured."""
         return bool(self.bot_token and self.chat_id)
 
-    def format_alert_message(self, row: Dict[str, Any]) -> str:
+    def format_alert_message(
+        self,
+        row: Dict[str, Any],
+        signal_type: Optional[str] = None,
+    ) -> str:
         """Format an anomaly candidate record into a clean Telegram Markdown message.
+
+        Supports both Long ([🟢 LONG SQUEEZE]) and Short ([🔴 SHORT WARNING])
+        with direction-specific [Cost]/[Benefit] criteria labels.
 
         Args:
             row: Dictionary containing coin metadata and TOPSIS metrics.
+            signal_type: Optional explicit direction ('LONG' or 'SHORT').
 
         Returns:
             str: Formatted Markdown message ready to send.
         """
+        direction = (signal_type or row.get("signal_type", "LONG")).upper().strip()
         symbol = str(row.get("symbol", "UNKNOWN"))
         rank = row.get("rank", "-")
         ci = float(row.get("topsis_score", 0.0))
@@ -63,22 +72,35 @@ class TelegramDispatcher:
 
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-        # Visual indicator emoji based on score
-        badge = "🔥 CRITICAL ANOMALY" if ci >= 0.75 else "⚡ ANOMALY DETECTED"
+        if direction == "SHORT":
+            header_badge = "🚨 *SPK SCREENER — [🔴 SHORT WARNING]*"
+            signals_block = (
+                f"*🔍 Multi-Criteria Market Signals (Short Matrix):*\n"
+                f"• *C1 [Benefit] Funding Rate:* `{c1_fr:+.4f}%` (Overcrowded Longs)\n"
+                f"• *C2 [Benefit] 4H Delta OI:* `{c2_oi:+.2f}%` (OI: `${oi_value:,.0f}`)\n"
+                f"• *C3 [Benefit] 1H BBW:* `{c3_bbw:.2f}%` (Volatility Expansion)\n"
+                f"• *C4 [Benefit] Depth Imbalance:* `{c4_depth:.2f}x` (Ask/Bid Resistance)\n"
+                f"• *C5 [Benefit] Volume/OI Velocity:* `{c5_vel:.4f}`"
+            )
+        else:
+            header_badge = "🚨 *SPK SCREENER — [🟢 LONG SQUEEZE]*"
+            signals_block = (
+                f"*🔍 Multi-Criteria Market Signals (Long Matrix):*\n"
+                f"• *C1 [Cost] Funding Rate:* `{c1_fr:+.4f}%`\n"
+                f"• *C2 [Benefit] 4H Delta OI:* `{c2_oi:+.2f}%` (OI: `${oi_value:,.0f}`)\n"
+                f"• *C3 [Cost] 1H BBW:* `{c3_bbw:.2f}%` (Compression)\n"
+                f"• *C4 [Benefit] Depth Imbalance:* `{c4_depth:.2f}x` (Bid/Ask Support)\n"
+                f"• *C5 [Benefit] Volume/OI Velocity:* `{c5_vel:.4f}`"
+            )
 
         message = (
-            f"🚨 *SPK CRYPTO SCREENER — {badge}*\n"
+            f"{header_badge}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🪙 *Pair:* `{symbol}` (Binance Futures)\n"
             f"🏆 *Rank:* `#{rank}`  |  *TOPSIS Score (Ci):* `{ci:.4f}`\n"
             f"💵 *Price:* `${last_price:,.4f}` ({price_change_24h:+.2f}% 24h)\n"
             f"📊 *24h Volume:* `${quote_vol_24h:,.0f} USDT`\n\n"
-            f"*🔍 Multi-Criteria Market Signals:*\n"
-            f"• *C1 [Cost] Funding Rate:* `{c1_fr:+.4f}%`\n"
-            f"• *C2 [Benefit] 4H Delta OI:* `{c2_oi:+.2f}%` (OI: `${oi_value:,.0f}`)\n"
-            f"• *C3 [Cost] 1H BBW:* `{c3_bbw:.2f}%` (Compression)\n"
-            f"• *C4 [Benefit] 2% Depth Imbalance:* `{c4_depth:.2f}x` (Bid/Ask)\n"
-            f"• *C5 [Benefit] Volume/OI Velocity:* `{c5_vel:.4f}`\n\n"
+            f"{signals_block}\n\n"
             f"⏰ *Time:* `{now_utc}`\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"💡 _$0-Cost Autonomous Decision Support System_"
@@ -116,14 +138,19 @@ class TelegramDispatcher:
             print(f"[TelegramDispatcher Network Error] {e}")
             return False
 
-    def send_alert(self, row: Dict[str, Any]) -> bool:
-        """Format and send an alert for a specific candidate.
+    def send_alert(
+        self,
+        row: Dict[str, Any],
+        signal_type: Optional[str] = None,
+    ) -> bool:
+        """Format and send an alert for a specific candidate and direction.
 
         Args:
             row: Dictionary containing candidate metrics.
+            signal_type: Optional explicit direction ('LONG' or 'SHORT').
 
         Returns:
             bool: True if alert was sent successfully, False otherwise.
         """
-        text = self.format_alert_message(row)
+        text = self.format_alert_message(row, signal_type=signal_type)
         return self.send_raw_message(text)
